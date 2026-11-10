@@ -205,6 +205,98 @@ Do not claim the second if the first is true.
 
 ---
 
+## Forecasting: Q11 to Q15, `forecast.py`, `forecast_checks.py`
+
+This part answers a different kind of question: not "what happened" but "if I had to plan next month, how wrong would I be, and is a cleverer method worth it?" It is the same skill as comparing performance to plan and turning it into a forward-looking forecast.
+
+### The ideas, in plain words
+
+**Forecast.** A number you state before the month happens: "English will have about 2,300 reviews in March."
+
+**Baseline.** The dumbest sensible forecast. Here it is the **naive** forecast: next month equals this month. A smarter model is only worth using if it beats the baseline on months it has not seen. If it does not, the honest answer is "use the baseline". The word "plan" in "plan vs actual" is the forecast you committed to; "actual" is what happened.
+
+**The four models**
+- **Naive:** last month repeats.
+- **Seasonal naive:** the same month last year repeats (needs at least 12 months of history).
+- **3-month average:** the average of the last 3 months. Smooths out a single odd month.
+- **Exponential smoothing (SES):** a weighted average of all earlier months where the newest month gets weight `alpha` and each older month gets a bit less, fading geometrically. One number, `alpha`, controls it: `alpha = 1` is exactly naive (only the last month counts), small `alpha` is close to a long-run average. The code picks `alpha` from 0.05, 0.10 ... 1.00, using only the months before the forecast, as the one whose past one-month-ahead forecasts had the smallest squared error. Written out: `level_1 = value_1`, then `level_t = alpha * value_t + (1 - alpha) * level_(t-1)`. The forecast for any later month is the latest level.
+
+**MAE vs MAPE**
+- **MAE** (mean absolute error): the average size of the miss, in the same unit as the data. "On average I was 406 reviews off." Good for comparing models on one series. For positive share it is in percentage points: "2.7 points off".
+- **MAPE** (mean absolute percentage error): the miss as a percent of the actual, averaged. "On average 16% off." Good for comparing series of different sizes (Simplified script has about 2,000 reviews a month, Korean about 70). Its weak spots: it blows up when the actual is near zero, and it punishes over-forecasts and under-forecasts unevenly. I show it for volume only. For a share, which is already a percent, the miss in points is clearer than a percent of a percent.
+- Both ignore direction. A model that is always 200 too low and one that is sometimes 200 too low and sometimes 200 too high get the same MAE. See Exercise 8 (bias).
+
+**Why a rolling backtest.** One split (fit on the first 18 months, test on the last 5) gives one lucky or unlucky number. A rolling backtest repeats the real situation many times: stand at the end of month 12, forecast month 13, score it; stand at the end of month 13, forecast month 14, score it; and so on, always using only what was known then. It gives 11 scored months at one month ahead. It also stops the main way forecasts go wrong in a write-up: using the future to forecast the past (leakage). Here `alpha` is re-picked at every origin using only earlier months, for exactly that reason.
+
+**Why July 2024 matters.** July to September 2024 is the review bomb: English had 13,675 reviews in July against about 2,000 to 2,900 in a normal month, and 18% positive. A forecast method treats that as information about the future. A naive forecast for August would have said 13,675 against an actual 4,639, and a 3-month average would carry the spike for three months. The error from one event would dominate every score and say nothing about how well the models forecast normal months. So the series leaves those months out, with the same rule as Q2 (the study's July to September block), and starts in October 2024. One consequence to say out loud: the series is short, 23 months, because the shared window of all five languages starts on 20 July 2024. Another: the months after the bomb are still unusual (English share was 34% in November 2024 and rose to the 60s over 2025), and that shows up in the numbers.
+
+### Q11. The clean monthly series (`11_monthly_series_clean.sql`)
+
+**What it answers:** the one table all forecasts read: reviews and positive share, per language and month, for the 23 clean months.
+
+**How it works**
+1. `CREATE OR REPLACE VIEW monthly_series AS ...` saves the query under a name. A view stores the query, not the rows, so later queries can `FROM monthly_series`.
+2. CTE `win`: the end of the data is the earliest "last review time" of the five languages (inner `max(created_at) ... GROUP BY language`, outer `min`). It is 21 September 2026.
+3. The main select counts reviews and takes `100.0 * avg(voted_up)` as positive share, per language and month.
+4. The two `WHERE` lines are the whole cleaning rule: months from 1 October 2024 (the first month after the bomb period) and months strictly before the month that contains the end of the data (a part-month would look like a collapse).
+5. The final `SELECT` after the semicolon only displays the view, rounded.
+
+**Interview sentence:** "The series is the study's clean sample: July to September 2024 is out, the last part-month is out, so each language has 23 full months."
+
+### Q12. Naive, seasonal naive, moving average (`12_baseline_forecasts.sql`)
+
+**What it answers:** every forecast that three of the models would have made, one and three months ahead, next to what actually happened.
+
+**How it works**
+1. `numbered`: gives each month a number 1, 2, 3 ... within its language with `row_number() OVER (PARTITION BY language ORDER BY month)`. The series has no gaps, so counting rows is the same as counting months.
+2. `long`: `UNION ALL` stacks the two measures (volume, positive share) into one table with a `metric` column, so one set of rules serves both.
+3. `with_ma`: `avg(value) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` is the 3-month average ending at each month.
+4. The final select joins three copies of `long`: `t` is the target month (what happened), `o` is the origin month, `h.horizon` months earlier (`o.rn = t.rn - h.horizon`), and `s` is the same month one year before the target (`s.rn = t.rn - 12`). The naive forecast is the origin's value, the moving average is the origin's 3-month average, the seasonal naive is `s.value`.
+5. `CROSS JOIN (VALUES (1), (3)) AS h(horizon)` repeats every row for horizon 1 and 3.
+6. `WHERE o.rn >= 12`: the first origin has 12 months of history. That makes the first scored target month 13 (October 2025) at horizon 1, and every model, including seasonal naive, is scored on the same months. The view is saved as `baseline_forecasts`.
+
+**Interview sentence:** "I joined each target month to its origin month with a row-number offset, so every forecast only uses months before it."
+
+### `forecast.py`: exponential smoothing
+
+1. `ses_levels(values, alpha)`: loop through the months. `level` starts at the first value; each new month moves the level a fraction `alpha` of the way toward it. It returns the level after every month.
+2. `best_alpha(values)`: for each `alpha` in the grid, make the levels, and score the one-step forecasts: month `k` is forecast by the level after month `k-1`, the miss is squared and summed. Keep the `alpha` with the smallest sum (the first one wins a tie).
+3. `ses_backtest(series)`: for each language, measure and horizon, and for each origin with at least 12 months, cut the history to the months up to the origin, pick `alpha` on that history only, and take the last level as the forecast. The forecast for a later month is flat, because SES has no trend.
+4. `add_ses_table(con)`: reads `monthly_series`, runs the backtest and stores the rows as the table `ses_forecasts` so SQL can join them.
+
+**Limit to say:** SES has no trend and no seasonality. In English volume the chosen `alpha` was 0.05 (the lowest value tried) at every origin, so the forecast was close to a flat long-run average and missed the rise from 2025 to 2026. I did not widen the grid after seeing that, because changing the method after seeing the test scores is tuning on the test.
+
+### Q13. Backtest scores (`13_backtest_scores.sql`)
+
+**What it answers:** for every language, measure, horizon and model, how large the misses were.
+
+**How it works**
+1. `joined`: puts the SES forecast next to the three SQL forecasts, matching on language, measure, horizon and target month (`JOIN ... USING`).
+2. `long`: `UNPIVOT` turns the four forecast columns into rows (`model`, `forecast`), so one `GROUP BY` can score all four. It is the reverse of the `CASE WHEN` pivot in Q10.
+3. `scores`: per language, measure, horizon and model, `avg(abs(actual - forecast))` is the MAE and `100 * avg(abs(actual - forecast) / actual)` is the MAPE.
+4. The last select adds `vs_naive_pct`: `100 * (1 - mae / naive_mae)`. The naive MAE is picked out with `max(mae) FILTER (WHERE model = 'naive') OVER (PARTITION BY language, metric, horizon)`, the same "find one row's value and repeat it on the group" trick as in Q5. Positive means better than naive; negative means worse.
+
+### Q14 and Q15
+
+**Q14** counts, per measure, horizon and model, in how many of the 5 languages `vs_naive_pct > 0`, with `count(*) FILTER (WHERE ...)`. It is the headline table. Note that it counts languages equally and does not say how big the wins are.
+
+**Q15** is plan vs actual. For the last 6 months, one month ahead, it lists the actual value, each model's plan, and the miss `actual - plan` (positive means the plan was too low). `max(month) - INTERVAL 5 MONTH` picks the six months without typing dates.
+
+### `forecast_checks.py`: how the numbers are checked
+
+It does not trust the SQL. It reads the raw reviews file with pandas, rebuilds the monthly series, and makes every forecast again with different code: `rolling(3).mean()` for the moving average and `ewm(alpha, adjust=False)`, pandas' own exponential smoothing, for SES. Then it scores them and compares with the SQL and `forecast.py` result row by row. In `run_all.py` these are the rows marked Q11 to Q15 and SES. The checks were tested by breaking SES on purpose (an `alpha` grid of one value): the table turned to NO, as it should. The checks prove the code matches an independent version of the same method. They do not prove the method is the right one.
+
+### What the results say, and what to be careful about
+
+- One month ahead, exponential smoothing beat naive in 3 of 5 languages on volume and 4 of 5 on positive share; it did not for English volume, Korean volume, and Simplified script share.
+- The 3-month average and exponential smoothing were similar; seasonal naive was clearly worst for share.
+- It is 11 scored months per language at one month ahead and 9 at three months, with no significance test. Say "a small edge, mixed by language", not "the model is better".
+- All 23 months come from one game over about two years, with the tail of a review bomb at the start.
+
+**Interview sentence:** "I backtested one-month-ahead forecasts of review volume and positive share against a 'last month repeats' baseline: exponential smoothing beat it in 3 of 5 languages on volume and 4 of 5 on share, but not for English volume, and with only 11 test months I call it a small edge, not a proof."
+
+---
+
 ## Practice exercises
 
 Do these without AI. Answers are at the bottom, but try first. Each uses the same two tables. Run your own version, then compare results (not code) with the answers.
@@ -218,6 +310,12 @@ Do these without AI. Answers are at the bottom, but try first. Each uses the sam
 **Exercise 4: a conditional share.** For each language, what percent of its reviews were written between 1 July 2024 and 30 September 2024 (use the same 30 September 00:00 end as the project)? Order from highest to lowest. (Hint: `count(*) FILTER (WHERE ...)`.)
 
 **Exercise 5: volume above trailing mean plus 3 standard deviations.** For each language, flag months where the review count is above the mean plus 3 standard deviations of that language's earlier months. Use at least 6 earlier months. What do you notice about which languages show up, and why?
+
+**Exercise 6: score two forecasts in SQL.** For Japanese review volume, October 2024 to August 2026 (23 months, from `reviews`), forecast each month with (a) the naive forecast (the month before) and (b) the average of the 3 months before it. Score only the months from the 13th onward, as the project does. Return the number of months scored and the MAE of each. (Hint: `lag`, and a frame `ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING`.)
+
+**Exercise 7: exponential smoothing by hand.** Four months of values: 100, 120, 110, 130. (a) With `alpha = 0.5`, write the level after each month and the forecast for month 5. (b) With `alpha = 1`, the same. (c) Using the one-step forecasts for months 2, 3 and 4 (each is the level after the month before it), which `alpha` has the smaller sum of squared errors?
+
+**Exercise 8: bias.** For English volume, one month ahead, compute for the naive and the exponential smoothing forecasts both the MAE and the average of `actual - forecast` (the bias). What does the bias tell you that the MAE does not? (Run `python run_all.py` first: the tables `baseline_forecasts` and `ses_forecasts` are built by it. Use `backtest_forecasts.csv` in `results/` if you prefer.)
 
 ---
 
@@ -345,3 +443,48 @@ WHERE prior_months >= 6
 ORDER BY language, month;
 ```
 Check: three rows. Japanese July 2024 (589 reviews against an upper limit of 368), Traditional script May 2022 (755 against 750, only just over), and Traditional script July 2024 (3,829 against 954). What you should notice: English and Simplified script never appear. English has only 2 earlier months before July 2024 and Simplified script has none, because the data for those languages starts at the spike. A rule that needs history cannot judge a series that starts at the spike. The study's median rule (Q3) uses the whole series, including the spike month, so it can flag English and Simplified script July 2024 where this one cannot. The trade-off: the whole-series baseline contains the spike, although the median resists it.
+
+
+**Exercise 6**
+```sql
+WITH monthly AS (
+    SELECT month, count(*) AS reviews
+    FROM reviews
+    WHERE language = 'japanese'
+      AND month BETWEEN DATE '2024-10-01' AND DATE '2026-08-01'
+    GROUP BY month
+),
+f AS (
+    SELECT month, reviews,
+           row_number() OVER w AS rn,
+           lag(reviews) OVER w AS naive,
+           avg(reviews) OVER (ORDER BY month ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING) AS ma3
+    FROM monthly
+    WINDOW w AS (ORDER BY month)
+)
+SELECT count(*)                            AS months_scored,
+       round(avg(abs(reviews - naive)), 2) AS naive_mae,
+       round(avg(abs(reviews - ma3)), 2)   AS ma3_mae
+FROM f
+WHERE rn >= 13;
+```
+Check: 11 months, naive MAE 35.36, 3-month average MAE 26.39 (the same as the Japanese rows in Q13). The frame `3 PRECEDING AND 1 PRECEDING` leaves out the current month, which is what keeps it a forecast and not a smoothing of the answer. `rn >= 13` makes the first scored month October 2025 (12 months of history first), the same as the project.
+
+**Exercise 7**
+(a) `alpha = 0.5`: level 1 = 100; level 2 = 0.5 x 120 + 0.5 x 100 = 110; level 3 = 0.5 x 110 + 0.5 x 110 = 110; level 4 = 0.5 x 130 + 0.5 x 110 = 120. The forecast for month 5 is the last level, 120.
+(b) `alpha = 1`: each level is just the newest value: 100, 120, 110, 130. The forecast for month 5 is 130, the naive forecast.
+(c) `alpha = 0.5` forecasts months 2, 3, 4 as 100, 110, 110 against actual 120, 110, 130: misses 20, 0, 20, squared sum 800. `alpha = 1` forecasts 100, 120, 110: misses 20, 10, 20, squared sum 900. So 0.5 is better on these four numbers, and the project's `best_alpha` would pick it over 1.0 from this history (it tries all 20 values of its grid).
+
+**Exercise 8**
+```sql
+SELECT round(avg(abs(b.actual - b.naive)), 1) AS naive_mae,
+       round(avg(b.actual - b.naive), 1)      AS naive_bias,
+       round(avg(abs(b.actual - s.ses)), 1)   AS ses_mae,
+       round(avg(b.actual - s.ses), 1)        AS ses_bias
+FROM baseline_forecasts b
+JOIN ses_forecasts s USING (language, metric, horizon, target_month)
+WHERE b.language = 'english'
+  AND b.metric = 'volume'
+  AND b.horizon = 1;
+```
+Check: naive MAE 406.1, bias +146.8; exponential smoothing MAE 424.8, bias +200.2. Both biases are positive: on average both plans were too low, because English volume rose over the backtest period (from about 1,500 to about 3,200 a month). Exponential smoothing is more biased because its weight was 0.05, so its forecast is almost flat and lags the rise; naive follows the rise one month late. The MAE says "about 400 off" for both; the bias says the miss is mostly one direction, which is a model problem (no trend), not random noise. A model with no bias but the same MAE would be a better one to trust.
