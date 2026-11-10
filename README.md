@@ -86,4 +86,4 @@ The full output, one row per check, is written to `check_table.md` every run.
 
 ## How this was built
 
-The queries were drafted with Claude Code, an AI coding assistant, as a coding partner. I then ran them against my own data and checked every result against the figures I had already published. I wrote `LEARN.md` so that I can explain each query and rewrite it myself.
+The queries were drafted with Claude Code, an AI coding assistant, as a coding partner. I then ran them against my own data and checked every result against the figures I had already published. `LEARN.md` explains each query in plain words so that I can explain and rewrite it myself.
