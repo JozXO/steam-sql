@@ -1,0 +1,13 @@
+language,month,reviews,multiple_of_normal,positive_rate,language_median_positive
+english,2024-07,13675,6.0,18.0,62.8
+english,2024-08,4639,2.0,44.0,62.8
+english,2024-11,5094,2.2,34.0,62.8
+schinese,2024-07,27227,14.9,8.8,60.6
+schinese,2024-08,7488,4.1,18.4,60.6
+schinese,2024-09,4560,2.5,23.2,60.6
+tchinese,2024-07,3829,11.9,9.0,38.0
+tchinese,2024-08,694,2.1,20.0,38.0
+japanese,2024-07,589,3.6,19.0,48.0
+japanese,2024-08,340,2.1,32.1,48.0
+koreana,2024-07,386,2.5,24.6,68.2
+koreana,2024-08,432,2.9,27.8,68.2

@@ -1,0 +1,4 @@
+steam.duckdb
+steam.duckdb.wal
+__pycache__/
+*.pyc
